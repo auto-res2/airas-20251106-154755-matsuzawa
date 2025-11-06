@@ -131,7 +131,42 @@
     },
     "iterations": [
       {
-        "method": "Importance–Weighted LoRA (IW-LoRA)\nMinimal change: keep standard LoRA training but add a single extra L2 term whose coefficient is different for every weight matrix.\n1. Warm-up (calibration) phase: run 100–200 forward/backward passes with LoRA parameters frozen (or very small lr) and record the running average of per-matrix gradient sensitivity s_k = E[||∂L/∂W_k||_F].\n2. Define importance weight w_k = s_k / (Σ_j s_j).\n3. During actual fine-tuning (LoRA parameters trainable) minimise\n   L_total = L_task  +  α · Σ_k (1 – w_k)^β · ||Δ_k||_F² ,\n   where Δ_k is the LoRA update for matrix k, α≃1e-4 and β=1 (can be fixed).\n   Layers with high w_k receive almost no penalty and can use the rank budget freely, while unimportant layers are softly shrunk toward zero; the fixed global rank therefore re-allocates itself automatically without pruning or SVD."
+        "method": "Importance–Weighted LoRA (IW-LoRA)\nMinimal change: keep standard LoRA training but add a single extra L2 term whose coefficient is different for every weight matrix.\n1. Warm-up (calibration) phase: run 100–200 forward/backward passes with LoRA parameters frozen (or very small lr) and record the running average of per-matrix gradient sensitivity s_k = E[||∂L/∂W_k||_F].\n2. Define importance weight w_k = s_k / (Σ_j s_j).\n3. During actual fine-tuning (LoRA parameters trainable) minimise\n   L_total = L_task  +  α · Σ_k (1 – w_k)^β · ||Δ_k||_F² ,\n   where Δ_k is the LoRA update for matrix k, α≃1e-4 and β=1 (can be fixed).\n   Layers with high w_k receive almost no penalty and can use the rank budget freely, while unimportant layers are softly shrunk toward zero; the fixed global rank therefore re-allocates itself automatically without pruning or SVD.",
+        "experimental_design": {
+          "experiment_summary": "The experiment evaluates the new Importance-Weighted LoRA (IW-LoRA) regularisation against the standard LoRA adaptation on a strong encoder model.  \n1. We fine-tune a single backbone (DeBERTaV3-base, ≈86 M parameters) on the GLUE MNLI natural-language-understanding benchmark.  \n2. A short, 150-step warm-up pass is run with LoRA parameters frozen to collect per-matrix gradient sensitivities s_k.  \n3. Sensitivities are normalised to importance weights w_k and stored.  \n4. Full fine-tuning then proceeds for three epochs. The ordinary task loss is augmented with the importance-weighted L2 term α·Σ_k(1-w_k)^β‖Δ_k‖² (α searched, β fixed to 1).  \n5. We compare final validation accuracy to a vanilla LoRA baseline with identical rank=8 adapters.  \n6. All runs use the same optimisation settings (AdamW, three epochs, learning-rate schedule) and are executed on a single NVIDIA A100 (the available environment far exceeds the memory footprint).  \nThe workflow therefore isolates the effect of the proposed regulariser while keeping every other variable identical.",
+          "evaluation_metrics": [
+            "Accuracy"
+          ],
+          "proposed_method": "Importance-Weighted LoRA (IW-LoRA) is a drop-in regularisation for LoRA fine-tuning that redistributes a fixed low-rank budget toward layers that matter most.  \n• Theory: For each trainable weight matrix W_k equipped with a rank-r LoRA update Δ_k = A_kB_k, we approximate its task importance with the Frobenius norm of the gradient ‖∂L/∂W_k‖_F averaged over a small calibration run.  \n• Calibration: Freeze LoRA parameters, run 100–200 forward/backward passes, accumulate s_k = E[‖∂L/∂W_k‖_F].  \n• Importance weights: w_k = s_k / Σ_j s_j.  \n• Training objective: L_total = L_task + α Σ_k (1−w_k)^β ‖Δ_k‖_F² with global α (searched) and β=1. High-importance layers (large w_k) receive almost no penalty; low-importance layers are softly shrunk, effectively donating rank capacity to useful layers without explicit pruning or SVD.  \n• Implementation: only ~15 lines added to a standard LoRA training loop—store sensitivities, then, during each training step, compute the weighted L2 regulariser over all LoRA parameters and add it to the loss before back-propagation.  \n• Hyper-parameter economy: only α needs tuning; β can stay at 1 for all tasks.  \n• Computational cost: negligible—no iterative SVD, schedulers, or additional optimiser steps; calibration adds <2 % wall-time.",
+          "comparative_methods": [
+            "LoRA (rank = 8, no regularisation)"
+          ],
+          "models_to_use": [
+            "DeBERTaV3-base (≈86 M)"
+          ],
+          "datasets_to_use": [
+            "GLUE-MNLI"
+          ],
+          "hyperparameters_to_search": {
+            "learning_rate": "1e-5-5e-4",
+            "alpha_IW_LoRA": "1e-5-1e-3",
+            "batch_size": "16,32,64"
+          }
+        },
+        "experiment_runs": [
+          {
+            "run_id": "proposed-DeBERTaV3-base-86-M--GLUE-MNLI",
+            "method_name": "proposed",
+            "model_name": "DeBERTaV3-base (≈86 M)",
+            "dataset_name": "GLUE-MNLI"
+          },
+          {
+            "run_id": "comparative-1-DeBERTaV3-base-86-M--GLUE-MNLI",
+            "method_name": "comparative-1",
+            "model_name": "DeBERTaV3-base (≈86 M)",
+            "dataset_name": "GLUE-MNLI"
+          }
+        ]
       }
     ]
   }
