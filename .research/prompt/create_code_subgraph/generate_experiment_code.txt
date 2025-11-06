@@ -1,0 +1,344 @@
+
+LLM Name: o3-2025-04-16
+Input:
+You are a cutting-edge AI researcher generating complete, executable code for research paper experiments with Hydra configuration management.
+
+Based on the research method in # Current Research Method and experimental design in # Experimental Design, generate production-ready experiment code that integrates with Hydra for configuration management.
+
+# Instructions: Complete Experiment Code Generation
+
+## Core Requirements
+- COMPLETE IMPLEMENTATION: Every component must be fully functional, production-ready, publication-worthy code. No "omitted for brevity", no "simplified version", no TODO, PLACEHOLDER, pass, or ...
+- PYTORCH EXCLUSIVELY: Use PyTorch as the deep learning framework
+- HYDRA INTEGRATION: Use Hydra to manage all experiment configurations from `config/runs/*.yaml` files. Use `config_path="../config"` in all @hydra.main decorators
+- COMPLETE DATA PIPELINE: Full data loading and preprocessing implementation. Use `.cache/` as the cache directory for all datasets and models (e.g., for HuggingFace, set `cache_dir=".cache/"`)
+- WANDB REQUIRED: WandB is mandatory for metrics logging (except trial_mode validation)
+
+## Hydra Configuration Structure
+Each run config file (`config/runs/{run_id}.yaml`) contains:
+- run_id: Unique identifier for this run
+- method: The method name (baseline, proposed, ablation, etc.)
+- model: Model-specific parameters (name, architecture details, hyperparameters)
+- dataset: Dataset-specific parameters (name, preprocessing settings, split ratios)
+- training: Training hyperparameters (learning rate, batch size, epochs, optimizer settings, validation split)
+- optuna: Hyperparameter search space definition for Optuna optimization
+
+## Command Line Interface
+The generated code must support the following CLI:
+
+**Training (main.py):**
+```bash
+# Full experiment with WandB logging
+uv run python -u -m src.main run={run_id} results_dir={path} mode=full
+
+# Trial mode (validation only, WandB disabled)
+uv run python -u -m src.main run={run_id} results_dir={path} mode=trial
+```
+- `run`: Experiment run_id (matching a run_id from config/runs/*.yaml)
+- `results_dir`: Output directory (passed from GitHub Actions workflow)
+- `mode`: Execution mode (required parameter)
+  * `mode=trial`: Lightweight execution for validation (epochs=1, batches limited to 1-2, wandb.mode=disabled, optuna.n_trials=0)
+  * `mode=full`: Full experiment execution (wandb.mode=online, full epochs, full Optuna trials)
+  * **Code must automatically configure based on mode (e.g., `if cfg.mode == "trial": cfg.wandb.mode = "disabled"; cfg.optuna.n_trials = 0` elif `cfg.mode == "full": cfg.wandb.mode = "online"`)**
+
+**Evaluation (evaluate.py, independent execution):**
+```bash
+uv run python -m src.evaluate results_dir={path} run_ids='["run-1", "run-2", ...]'
+```
+- `results_dir`: Directory containing experiment metadata and where outputs will be saved
+- `run_ids`: JSON string list of run IDs to evaluate (e.g., '["run-1-proposed-bert-glue", "run-2-baseline-bert-glue"]')
+- Executed as a separate workflow after all training runs complete
+- **NOT called from main.py**
+
+## Script Structure (ExperimentCode format)
+Generate complete code for these files ONLY. Do not create any additional files beyond this structure:
+
+**`src/train.py`**: Single experiment run executor
+- Uses Hydra config to load all parameters
+- Called as subprocess by main.py
+- Responsibilities:
+  * Train model with given configuration
+  * Initialize WandB: `wandb.init(entity=cfg.wandb.entity, project=cfg.wandb.project, id=cfg.run.run_id, config=OmegaConf.to_container(cfg, resolve=True), resume="allow")`
+  * Skip `wandb.init()` if `cfg.wandb.mode == "disabled"` (trial_mode)
+  * **Optuna Integration**: If using Optuna for hyperparameter search, DO NOT log intermediate trial results to WandB - only train once with the best hyperparameters after optimization completes and log that final run
+  * **Log ALL metrics to WandB comprehensively**:
+    - Use `wandb.log()` at each training step/batch/epoch with ALL relevant metrics
+    - Log as frequently as possible (per-batch or per-epoch) to capture training dynamics
+    - Use CONSISTENT metric names across train.py and evaluate.py (e.g., if train.py logs "train_acc", evaluate.py MUST use run.history(keys=["train_acc",...]))
+  * **Save final/best metrics to WandB summary**:
+    - Use `wandb.summary["key"] = value` for final results
+  * Print WandB run URL to stdout
+- **NO results.json, no stdout JSON output, no figure generation**
+
+**`src/evaluate.py`**: Independent evaluation and visualization script
+- **Execution**: Run independently via `uv run python -m src.evaluate results_dir={path} run_ids='["run-1", "run-2"]'`
+- **NOT called from main.py** - executes as separate workflow after all training completes
+- **Responsibilities**:
+  * Parse command line arguments:
+    - `results_dir`: Output directory path
+    - `run_ids`: JSON string list of run IDs (parse with `json.loads(args.run_ids)`)
+  * Load WandB config from `config/config.yaml` (in repository root)
+  * **Retrieve comprehensive experimental data from WandB API** for specified run_ids:
+    ```python
+    import json
+    api = wandb.Api()
+    run_ids = json.loads(args.run_ids)  # Parse JSON string to list
+    for run_id in run_ids:
+        run = api.run(f"{entity}/{project}/{run_id}")
+        history = run.history()  # pandas DataFrame with ALL time-series metrics (train_loss, val_acc, etc.)
+        summary = run.summary._json_dict  # Final/best metrics (best_val_acc, final_test_acc, etc.)
+        config = dict(run.config)  # Run configuration (hyperparameters, model settings, etc.)
+    ```
+  * **STEP 1: Per-Run Processing** (for each run_id):
+    - Export **comprehensive** run-specific metrics to: `{results_dir}/{run_id}/metrics.json`
+    - Generate run-specific figures (learning curves, confusion matrices) to: `{results_dir}/{run_id}/`
+    - Each run should have its own subdirectory with its metrics and figures
+  * **STEP 2: Aggregated Analysis** (after processing all runs):
+    - Export aggregated metrics to: `{results_dir}/comparison/aggregated_metrics.json`
+    - Compute secondary/derived metrics (e.g., improvement rate: (proposed - baseline) / baseline)
+    - Generate comparison figures to: `{results_dir}/comparison/`:
+      * Cross-run comparison charts (bar charts, box plots)
+      * Performance metrics tables
+      * Statistical significance tests
+  * **Figure Generation Guidelines**:
+    - Use matplotlib or seaborn with proper legends, annotations, tight_layout
+    - For line graphs: annotate significant values (final/best values)
+    - For bar graphs: annotate values above each bar
+    - Use GLOBALLY UNIQUE image filenames to prevent collisions across different runs and directories**:
+      * Per-run figures: `{run_id}_{figure_topic}[_<condition>][_pairN].pdf` (e.g., `run-1-proposed-bert-glue_learning_curve.pdf`)
+      * Comparison figures: `comparison_{figure_topic}[_<condition>][_pairN].pdf` (e.g., `comparison_accuracy_bar_chart.pdf`)
+  * Print all generated file paths to stdout (both per-run and comparison)
+
+**`src/preprocess.py`**: Complete preprocessing pipeline implementation for the specified datasets
+
+**`src/model.py`**: Complete model architecture implementations for all methods (proposed and comparative methods)
+
+**`src/main.py`**: Main orchestrator
+- Receives run_id via Hydra, launches train.py as subprocess, manages logs
+- **DOES NOT call evaluate.py** (evaluate.py runs independently in separate workflow)
+- Use `@hydra.main(config_path="../config")` since execution is from repository root
+- **Mode handling**: Automatically configure based on `cfg.mode`:
+  * When `cfg.mode == "trial"`: Set `cfg.wandb.mode = "disabled"`, `cfg.optuna.n_trials = 0`, epochs=1, etc.
+  * When `cfg.mode == "full"`: Set `cfg.wandb.mode = "online"` and use full configuration
+
+**`config/config.yaml`**: Main Hydra configuration file
+- MUST include WandB configuration:
+  ```yaml
+  wandb:
+    entity: gengaru617-personal
+    project: 251106-test
+    mode: online  # Automatically set to "disabled" in trial_mode
+  ```
+- `WANDB_API_KEY` environment variable is automatically available for authentication
+
+**`pyproject.toml`**: Complete project dependencies
+- MUST include: `hydra-core`, `wandb` (required)
+- Include as needed: `optuna`, `torch`, `transformers`, `datasets`, etc.
+
+
+## Key Implementation Focus Areas
+1. **Hydra-Driven Configuration**: All parameters loaded from run configs dynamically
+2. **Algorithm Core**: Full implementation of the proposed method with proper abstraction
+3. **Mode-Based Behavior**: Code must automatically configure based on `cfg.mode` ("trial" vs "full")
+   - `mode=trial`: Set `cfg.wandb.mode="disabled"`, `cfg.optuna.n_trials=0`, epochs=1, limited batches
+   - `mode=full`: Set `cfg.wandb.mode="online"`, use full configuration
+4. **Run Execution**: main.py executes a single run_id passed via CLI (GitHub Actions dispatches multiple runs separately)
+5. **WandB Integration**: All metrics logged to WandB; train.py does NOT output JSON to stdout or save results.json
+6. **Independent Evaluation**: evaluate.py runs separately, fetches data from WandB API, generates all figures
+
+
+
+## Code Validation Feedback
+
+
+
+
+# Experimental Environment
+NVIDIA A100 or H200
+VRAM: 80 GB or more
+RAM: 2048 GB or more
+
+# Hypothesis
+open_problems='LoRA distributes the same rank to every weight matrix. AdaLoRA fixes this with iterative SVD‐based pruning but: (1) adds ~10–15 % training time, (2) introduces many scheduler hyper-parameters, (3) is fragile to importance-score estimation errors. We need a cheaper, hyper-parameter-light way to let more important layers use more of the limited LoRA capacity.' method='Importance–Weighted LoRA (IW-LoRA)\nMinimal change: keep standard LoRA training but add a single extra L2 term whose coefficient is different for every weight matrix.\n1. Warm-up (calibration) phase: run 100–200 forward/backward passes with LoRA parameters frozen (or very small lr) and record the running average of per-matrix gradient sensitivity s_k = E[||∂L/∂W_k||_F].\n2. Define importance weight w_k = s_k / (Σ_j s_j).\n3. During actual fine-tuning (LoRA parameters trainable) minimise\n   L_total = L_task  +  α · Σ_k (1 – w_k)^β · ||Δ_k||_F² ,\n   where Δ_k is the LoRA update for matrix k, α≃1e-4 and β=1 (can be fixed).\n   Layers with high w_k receive almost no penalty and can use the rank budget freely, while unimportant layers are softly shrunk toward zero; the fixed global rank therefore re-allocates itself automatically without pruning or SVD.' experimental_setup='Backbone: DeBERTaV3-base.\nDatasets: GLUE (MNLI, SST-2, RTE).\nBaselines: (a) Full fine-tune, (b) LoRA (rank=8 everywhere), (c) AdaLoRA (rank budget equivalent to rank 8).\nIW-LoRA uses the same fixed rank=8 but the new loss term.\nMetrics: dev accuracy (MNLI), F1 (RTE), and average score.\nTraining: 3 epochs, lr 2e-4, batch 32. α=1e-4, β=1 fixed for all runs.\nHardware: single V100 GPU.' experimental_code="# key excerpt – add IW-LoRA regularisation\ndef collect_sensitivity(model, data_loader, steps=200):\n    sens = {n:0. for n,p in model.named_parameters() if 'lora_A' in n}\n    for i, batch in enumerate(data_loader):\n        if i==steps: break\n        loss = model(**batch).loss\n        loss.backward()\n        for n,p in model.named_parameters():\n            if n in sens:\n                sens[n] += p.grad.detach().pow(2).sum()\n        model.zero_grad()\n    # normalise\n    total = sum(sens.values())\n    for n in sens: sens[n] = sens[n]/total\n    return sens\n\nsens = collect_sensitivity(model, train_loader)\n\nalpha, beta = 1e-4, 1.0\n\n# training loop\nfor batch in train_loader:\n    outputs = model(**batch)\n    loss = outputs.loss\n    reg = 0.\n    for n,p in model.named_parameters():\n        if 'lora_A' in n or 'lora_B' in n:  # treat A and B together\n            key = n.replace('lora_A','lora_A') if 'lora_A' in n else n.replace('lora_B','lora_A')\n            reg += (1-sens[key])**beta * p.pow(2).sum()\n    loss = loss + alpha*reg\n    loss.backward()\n    optimizer.step(); optimizer.zero_grad()" expected_result='IW-LoRA should match AdaLoRA and outperform vanilla LoRA while training in roughly the same time as LoRA (≈10-15 % faster than AdaLoRA). On GLUE we expect:\nMNLI accuracy: LoRA 84.6, AdaLoRA 85.3, IW-LoRA ≈85.1.\nSST-2 accuracy: LoRA 93.2, AdaLoRA 93.8, IW-LoRA ≈93.7.\nRTE F1: LoRA 72.0, AdaLoRA 73.4, IW-LoRA ≈73.2.\nAverage gain of ~0.6 points over vanilla LoRA with negligible extra compute.' expected_conclusion='A single importance-weighted L2 term lets the model allocate its fixed low-rank capacity where it matters, approaching AdaLoRA’s accuracy without its computational overhead or complex pruning schedule. The change is only a few lines of code and one new global hyper-parameter (α), making the technique easy to adopt in any LoRA-based fine-tuning pipeline.'
+
+# Current Research Method
+Importance–Weighted LoRA (IW-LoRA)
+Minimal change: keep standard LoRA training but add a single extra L2 term whose coefficient is different for every weight matrix.
+1. Warm-up (calibration) phase: run 100–200 forward/backward passes with LoRA parameters frozen (or very small lr) and record the running average of per-matrix gradient sensitivity s_k = E[||∂L/∂W_k||_F].
+2. Define importance weight w_k = s_k / (Σ_j s_j).
+3. During actual fine-tuning (LoRA parameters trainable) minimise
+   L_total = L_task  +  α · Σ_k (1 – w_k)^β · ||Δ_k||_F² ,
+   where Δ_k is the LoRA update for matrix k, α≃1e-4 and β=1 (can be fixed).
+   Layers with high w_k receive almost no penalty and can use the rank budget freely, while unimportant layers are softly shrunk toward zero; the fixed global rank therefore re-allocates itself automatically without pruning or SVD.
+
+# Experimental Design
+- Summary: The experiment evaluates the new Importance-Weighted LoRA (IW-LoRA) regularisation against the standard LoRA adaptation on a strong encoder model.  
+1. We fine-tune a single backbone (DeBERTaV3-base, ≈86 M parameters) on the GLUE MNLI natural-language-understanding benchmark.  
+2. A short, 150-step warm-up pass is run with LoRA parameters frozen to collect per-matrix gradient sensitivities s_k.  
+3. Sensitivities are normalised to importance weights w_k and stored.  
+4. Full fine-tuning then proceeds for three epochs. The ordinary task loss is augmented with the importance-weighted L2 term α·Σ_k(1-w_k)^β‖Δ_k‖² (α searched, β fixed to 1).  
+5. We compare final validation accuracy to a vanilla LoRA baseline with identical rank=8 adapters.  
+6. All runs use the same optimisation settings (AdamW, three epochs, learning-rate schedule) and are executed on a single NVIDIA A100 (the available environment far exceeds the memory footprint).  
+The workflow therefore isolates the effect of the proposed regulariser while keeping every other variable identical.
+- Evaluation metrics: ['Accuracy']
+
+# Experiment Runs
+
+- Run ID: proposed-DeBERTaV3-base-86-M--GLUE-MNLI
+  Method: proposed
+  Model: DeBERTaV3-base (≈86 M)
+  Dataset: GLUE-MNLI
+  Config File: config/runs/proposed-DeBERTaV3-base-86-M--GLUE-MNLI.yaml
+  
+  Config Content:
+  ```yaml
+  run_id: proposed-DeBERTaV3-base-86-M--GLUE-MNLI
+method: proposed
+model:
+  name: microsoft/deberta-v3-base
+  adapter:
+    type: lora
+    rank: 8           # same global rank as baseline
+    lora_alpha: 16    # conventional LoRA scaling factor
+  importance_weighted_regularisation:
+    enabled: true
+    reg_alpha: 1e-4   # default value; tuned by Optuna under key ``iw_reg_alpha``
+    beta: 1.0
+    sensitivity_warmup_steps: 150
+    sensitivity_buffer_size: 1024  # mini-batches stored for running average
+    freeze_lora_during_warmup: true
+
+dataset:
+  name: glue
+  subset: mnli
+  splits:
+    train: train
+    validation: validation_matched
+  max_seq_length: 256
+  preprocessing:
+    truncation: true
+    padding: max_length
+
+training:
+  epochs: 3
+  batch_size: 32          # default; can be overridden by Optuna
+  learning_rate: 2.0e-4   # default; tuned by Optuna
+  optimizer: adamw
+  weight_decay: 0.01
+  lr_scheduler: linear
+  warmup_steps: 500
+  gradient_accumulation_steps: 1
+  fp16: true
+  seed: 42
+  log_every_n_steps: 50
+  save_strategy: epoch
+  evaluation_strategy: epoch
+
+optuna:
+  direction: maximize                 # maximise validation accuracy
+  metric_name: validation_accuracy
+  n_trials: 30
+  search_space:
+    learning_rate:
+      type: loguniform
+      low: 1e-5
+      high: 5e-4
+    batch_size:
+      type: categorical
+      choices: [16, 32, 64]
+    iw_reg_alpha:
+      type: loguniform
+      low: 1e-5
+      high: 1e-3
+
+  ```
+  
+
+- Run ID: comparative-1-DeBERTaV3-base-86-M--GLUE-MNLI
+  Method: comparative-1
+  Model: DeBERTaV3-base (≈86 M)
+  Dataset: GLUE-MNLI
+  Config File: config/runs/comparative-1-DeBERTaV3-base-86-M--GLUE-MNLI.yaml
+  
+  Config Content:
+  ```yaml
+  run_id: comparative-1-DeBERTaV3-base-86-M--GLUE-MNLI
+method: comparative-1
+model:
+  name: microsoft/deberta-v3-base
+  adapter:
+    type: lora
+    rank: 8
+    lora_alpha: 16
+  importance_weighted_regularisation:
+    enabled: false     # vanilla LoRA, no extra regulariser
+
+dataset:
+  name: glue
+  subset: mnli
+  splits:
+    train: train
+    validation: validation_matched
+  max_seq_length: 256
+  preprocessing:
+    truncation: true
+    padding: max_length
+
+training:
+  epochs: 3
+  batch_size: 32          # default; can be overridden by Optuna
+  learning_rate: 2.0e-4   # default; tuned by Optuna
+  optimizer: adamw
+  weight_decay: 0.01
+  lr_scheduler: linear
+  warmup_steps: 500
+  gradient_accumulation_steps: 1
+  fp16: true
+  seed: 42
+  log_every_n_steps: 50
+  save_strategy: epoch
+  evaluation_strategy: epoch
+
+optuna:
+  direction: maximize                 # maximise validation accuracy
+  metric_name: validation_accuracy
+  n_trials: 30
+  search_space:
+    learning_rate:
+      type: loguniform
+      low: 1e-5
+      high: 5e-4
+    batch_size:
+      type: categorical
+      choices: [16, 32, 64]
+
+  ```
+  
+
+
+# External Resources (Use these for implementation)
+
+**HuggingFace Models:**
+
+- ID: microsoft/deberta-v3-base
+
+
+
+**HuggingFace Datasets:**
+
+- ID: Neuronovo/neuronovo-utc-data-glue-mnli
+
+
+
+
+Generate complete, production-ready experiment code that integrates with Hydra configuration system.
+Output:
+{
+    "train_py": "#!/usr/bin/env python\n\"\"\"src/train.py\nSingle-run trainer with Hydra, Optuna, LoRA and the proposed IW-LoRA regulariser.\n\"\"\"\nfrom __future__ import annotations\n\nimport json\nimport os\nimport shutil\nimport subprocess\nimport sys\nfrom pathlib import Path\nfrom typing import Dict, List\n\nimport hydra\nimport numpy as np\nimport optuna\nimport torch\nimport torch.nn.functional as F\nimport wandb\nfrom datasets import load_dataset\nfrom hydra.utils import get_original_cwd\nfrom omegaconf import DictConfig, OmegaConf\nfrom sklearn.metrics import accuracy_score\nfrom torch.utils.data import DataLoader\nfrom tqdm.auto import tqdm\nfrom transformers import (AutoModelForSequenceClassification, AutoTokenizer,\n                          DataCollatorWithPadding, get_linear_schedule_with_warmup)\n\n# PEFT – LoRA support\nfrom peft import LoraConfig, get_peft_model\n\n# -----------------------------------------------------------------------------\n# Utility helpers\n# -----------------------------------------------------------------------------\n\ndef set_seed(seed: int) -> None:\n    import random\n    random.seed(seed)\n    np.random.seed(seed)\n    torch.manual_seed(seed)\n    torch.cuda.manual_seed_all(seed)\n\n\ndef get_device() -> torch.device:\n    return torch.device(\"cuda\" if torch.cuda.is_available() else \"cpu\")\n\n\n# -----------------------------------------------------------------------------\n# Data pipeline helpers (identical to src/preprocess.py but inlined for speed)\n# -----------------------------------------------------------------------------\n\ndef load_and_prepare_data(cfg: DictConfig):\n    \"\"\"Loads the HF dataset, tokenises and returns DataLoaders.\"\"\"\n    tokenizer = AutoTokenizer.from_pretrained(cfg.model.name, cache_dir=\".cache/\")\n\n    # -------------- Load dataset --------------\n    dataset = load_dataset(\n        cfg.dataset.name,\n        cfg.dataset.get(\"subset\", None),\n        cache_dir=\".cache/\",\n    )\n\n    # -------------- Preprocess --------------\n    max_len = cfg.dataset.max_seq_length\n\n    def tokenize_fn(example):\n        return tokenizer(\n            example[\"premise\" if cfg.dataset.get(\"subset\", \"mnli\") == \"mnli\" else 0],\n            example[\"hypothesis\" if cfg.dataset.get(\"subset\", \"mnli\") == \"mnli\" else 1],\n            truncation=cfg.dataset.preprocessing.truncation,\n            padding=cfg.dataset.preprocessing.padding,\n            max_length=max_len,\n        )\n\n    # for MNLI, fields are premise/hypothesis; adapt for generic GLUE tasks\n    with torch.no_grad():\n        dataset = dataset.map(tokenize_fn, batched=True, load_from_cache_file=True)\n\n    # remove columns not needed\n    remove_cols = [col for col in dataset[\"train\"].column_names if col not in [\n        \"input_ids\", \"token_type_ids\", \"attention_mask\", \"label\"]]\n    dataset = dataset.remove_columns(remove_cols)\n\n    # -------------- DataLoaders --------------\n    data_collator = DataCollatorWithPadding(tokenizer)\n\n    def make_loader(split, shuffle=False, batch_size=cfg.training.batch_size):\n        return DataLoader(\n            dataset[split],\n            batch_size=batch_size,\n            shuffle=shuffle,\n            collate_fn=data_collator,\n        )\n\n    train_loader = make_loader(cfg.dataset.splits.train, True)\n    val_loader = make_loader(cfg.dataset.splits.validation, False, batch_size=cfg.training.batch_size)\n\n    return tokenizer, train_loader, val_loader\n\n# -----------------------------------------------------------------------------\n# IW-LoRA helpers\n# -----------------------------------------------------------------------------\n\ndef collect_sensitivity(model: torch.nn.Module, loader: DataLoader, steps: int) -> Dict[str, float]:\n    \"\"\"Accumulates squared gradient Frobenius norms for every LoRA matrix.\"\"\"\n\n    sensitivity: Dict[str, float] = {n: 0.0 for n, p in model.named_parameters() if \"lora_A\" in n}\n    device = next(model.parameters()).device\n    itr = iter(loader)\n    model.train()\n\n    with tqdm(total=steps, desc=\"IW-LoRA warmup\", leave=False) as pbar:\n        for step in range(steps):\n            try:\n                batch = next(itr)\n            except StopIteration:\n                itr = iter(loader)\n                batch = next(itr)\n\n            batch = {k: v.to(device) for k, v in batch.items()}\n            outputs = model(**batch)\n            loss = outputs.loss\n            loss.backward()\n            for n, p in model.named_parameters():\n                if n in sensitivity and p.grad is not None:\n                    sensitivity[n] += p.grad.detach().pow(2).sum().item()\n            model.zero_grad(set_to_none=True)\n            pbar.update(1)\n\n    total = sum(sensitivity.values())\n    if total == 0:\n        total = 1e-12\n    for k in sensitivity:\n        sensitivity[k] /= total\n    return sensitivity\n\n\n# -----------------------------------------------------------------------------\n# Training & evaluation loops\n# -----------------------------------------------------------------------------\n\ndef evaluate(model, loader):\n    device = next(model.parameters()).device\n    model.eval()\n    preds, labels = [], []\n    with torch.no_grad():\n        for batch in loader:\n            batch = {k: v.to(device) for k, v in batch.items()}\n            outputs = model(**batch)\n            logits = outputs.logits\n            preds.extend(logits.argmax(dim=-1).cpu().tolist())\n            labels.extend(batch[\"labels\" if \"labels\" in batch else \"label\"].cpu().tolist())\n    return accuracy_score(labels, preds)\n\n\n# -----------------------------------------------------------------------------\n# Optuna objective\n# -----------------------------------------------------------------------------\n\ndef optuna_objective(trial: optuna.Trial, cfg: DictConfig) -> float:\n    \"\"\"Runs a lightweight 1-epoch fine-tuning and returns validation accuracy.\"\"\"\n    # --- Suggest hyper-params ---\n    lr = trial.suggest_float(\"learning_rate\", cfg.optuna.search_space.learning_rate.low,\n                             cfg.optuna.search_space.learning_rate.high, log=True)\n    batch_size = trial.suggest_categorical(\"batch_size\", cfg.optuna.search_space.batch_size.choices)\n    reg_alpha = None\n    if cfg.model.get(\"importance_weighted_regularisation\", {}).get(\"enabled\", False):\n        reg_alpha = trial.suggest_float(\"iw_reg_alpha\", cfg.optuna.search_space.iw_reg_alpha.low,\n                                        cfg.optuna.search_space.iw_reg_alpha.high, log=True)\n    cfg.training.learning_rate = lr\n    cfg.training.batch_size = batch_size\n    if reg_alpha is not None:\n        cfg.model.importance_weighted_regularisation.reg_alpha = reg_alpha\n\n    # --- Prepare data ---\n    tokenizer, train_loader, val_loader = load_and_prepare_data(cfg)\n\n    # --- Model ---\n    device = get_device()\n    base_model = AutoModelForSequenceClassification.from_pretrained(\n        cfg.model.name, cache_dir=\".cache/\", num_labels=3)  # MNLI num_labels=3\n\n    lora_cfg = LoraConfig(\n        r=cfg.model.adapter.rank,\n        lora_alpha=cfg.model.adapter.lora_alpha,\n        target_modules=[\"query_proj\", \"value_proj\"],\n        bias=\"none\",\n    )\n    model = get_peft_model(base_model, lora_cfg).to(device)\n\n    # --- Optimiser & scheduler ---\n    optim = torch.optim.AdamW(model.parameters(), lr=cfg.training.learning_rate,\n                              weight_decay=cfg.training.weight_decay)\n    total_steps = len(train_loader)\n    scheduler = get_linear_schedule_with_warmup(optim, 0, total_steps)\n\n    scaler = torch.cuda.amp.GradScaler(enabled=cfg.training.fp16 and torch.cuda.is_available())\n\n    # --- One epoch training ---\n    model.train()\n    for step, batch in enumerate(train_loader):\n        batch = {k: v.to(device) for k, v in batch.items()}\n        with torch.cuda.amp.autocast(enabled=cfg.training.fp16 and torch.cuda.is_available()):\n            outputs = model(**batch)\n            loss = outputs.loss\n        scaler.scale(loss).backward()\n        scaler.step(optim)\n        scaler.update()\n        optim.zero_grad(set_to_none=True)\n        scheduler.step()\n        if step > 200:  # lighter than full pass\n            break\n\n    val_acc = evaluate(model, val_loader)\n    return val_acc\n\n\n# -----------------------------------------------------------------------------\n# Main train function\n# -----------------------------------------------------------------------------\n@hydra.main(config_path=\"../config\", version_base=None)\ndef main(cfg: DictConfig):  # pylint: disable=unused-argument\n    os.environ.setdefault(\"TOKENIZERS_PARALLELISM\", \"true\")\n    print(\"Hydra working dir:\", os.getcwd())\n\n    # ------------------------------------------------------------------\n    # Trial / Full mode adjustments (main.py already sets but be safe)\n    # ------------------------------------------------------------------\n    if cfg.mode == \"trial\":\n        cfg.wandb.mode = \"disabled\"\n        cfg.optuna.n_trials = 0\n        cfg.training.epochs = 1\n        cfg.training.log_every_n_steps = 1\n    else:\n        cfg.wandb.mode = \"online\"\n\n    # ------------------------------------------------------------------\n    # Hyper-parameter search with Optuna (offline)\n    # ------------------------------------------------------------------\n    if cfg.optuna.n_trials > 0:\n        study = optuna.create_study(direction=cfg.optuna.direction)\n        study.optimize(lambda trial: optuna_objective(trial, OmegaConf.create(OmegaConf.to_container(cfg, deepcopy=True))),\n                       n_trials=cfg.optuna.n_trials)\n        best_params = study.best_params\n        print(\"[Optuna] Best parameters:\", best_params)\n        # Update cfg with the best hyper-params for final training\n        for k, v in best_params.items():\n            if k == \"batch_size\":\n                cfg.training.batch_size = v\n            elif k == \"learning_rate\":\n                cfg.training.learning_rate = v\n            elif k == \"iw_reg_alpha\":\n                cfg.model.importance_weighted_regularisation.reg_alpha = v\n\n    # ------------------------------------------------------------------\n    # Initialise WandB (may be disabled)\n    # ------------------------------------------------------------------\n    if cfg.wandb.mode != \"disabled\":\n        wandb.init(\n            entity=cfg.wandb.entity,\n            project=cfg.wandb.project,\n            id=cfg.run.run_id,\n            config=OmegaConf.to_container(cfg, resolve=True),\n            resume=\"allow\",\n            mode=cfg.wandb.mode,\n        )\n        print(\"WandB URL:\", wandb.run.get_url())\n\n    # ------------------------------------------------------------------\n    # Data\n    # ------------------------------------------------------------------\n    tokenizer, train_loader, val_loader = load_and_prepare_data(cfg)\n\n    # ------------------------------------------------------------------\n    # Model + LoRA\n    # ------------------------------------------------------------------\n    device = get_device()\n    num_labels = 3  # For MNLI; could be dynamic by dataset\n    base_model = AutoModelForSequenceClassification.from_pretrained(\n        cfg.model.name, cache_dir=\".cache/\", num_labels=num_labels)\n\n    lora_cfg = LoraConfig(\n        r=cfg.model.adapter.rank,\n        lora_alpha=cfg.model.adapter.lora_alpha,\n        target_modules=[\"query_proj\", \"value_proj\"],\n        bias=\"none\",\n    )\n    model = get_peft_model(base_model, lora_cfg).to(device)\n\n    # ------------------------------------------------------------------\n    # IW-LoRA warm-up phase\n    # ------------------------------------------------------------------\n    importance_weights: Dict[str, float] = {}\n    if cfg.model.importance_weighted_regularisation.enabled:\n        warmup_steps = cfg.model.importance_weighted_regularisation.sensitivity_warmup_steps\n        print(f\"Collecting importance weights for {warmup_steps} steps…\")\n        importance_weights = collect_sensitivity(model, train_loader, warmup_steps)\n        print(\"First 5 importance weights:\", list(importance_weights.items())[:5])\n\n    # ------------------------------------------------------------------\n    # Training setup\n    # ------------------------------------------------------------------\n    total_train_steps = cfg.training.epochs * len(train_loader) // cfg.training.gradient_accumulation_steps\n\n    optim = torch.optim.AdamW(\n        model.parameters(),\n        lr=cfg.training.learning_rate,\n        weight_decay=cfg.training.weight_decay,\n    )\n    scheduler = get_linear_schedule_with_warmup(\n        optim, cfg.training.warmup_steps, total_train_steps\n    )\n\n    scaler = torch.cuda.amp.GradScaler(enabled=cfg.training.fp16 and torch.cuda.is_available())\n\n    # ------------------------------------------------------------------\n    # Training loop\n    # ------------------------------------------------------------------\n    global_step = 0\n    best_val_acc = 0.0\n    model.train()\n    for epoch in range(cfg.training.epochs):\n        epoch_loss = 0.0\n        epoch_reg = 0.0\n        pbar = tqdm(train_loader, desc=f\"Epoch {epoch+1}/{cfg.training.epochs}\")\n        for step, batch in enumerate(pbar):\n            batch = {k: v.to(device) for k, v in batch.items()}\n            with torch.cuda.amp.autocast(enabled=cfg.training.fp16 and torch.cuda.is_available()):\n                outputs = model(**batch)\n                loss = outputs.loss\n                # IW-LoRA reg\n                if cfg.model.importance_weighted_regularisation.enabled:\n                    reg = 0.0\n                    beta = cfg.model.importance_weighted_regularisation.beta\n                    alpha_reg = cfg.model.importance_weighted_regularisation.reg_alpha\n                    for name, param in model.named_parameters():\n                        if \"lora_A\" in name or \"lora_B\" in name:\n                            key = name.replace(\"lora_B\", \"lora_A\")  # pair key\n                            w_k = importance_weights.get(key, 0.0)\n                            reg += ((1 - w_k) ** beta) * param.pow(2).sum()\n                    loss = loss + alpha_reg * reg\n                else:\n                    reg = torch.tensor(0.0, device=device)\n\n            scaler.scale(loss / cfg.training.gradient_accumulation_steps).backward()\n            if (step + 1) % cfg.training.gradient_accumulation_steps == 0:\n                scaler.step(optim)\n                scaler.update()\n                optim.zero_grad(set_to_none=True)\n                scheduler.step()\n                global_step += 1\n\n            epoch_loss += loss.item()\n            if cfg.model.importance_weighted_regularisation.enabled:\n                epoch_reg += reg.item() if isinstance(reg, torch.Tensor) else reg\n\n            if cfg.wandb.mode != \"disabled\" and global_step % cfg.training.log_every_n_steps == 0:\n                wandb.log({\n                    \"train_loss\": loss.item(),\n                    \"train_reg\": epoch_reg / (step + 1),\n                    \"lr\": scheduler.get_last_lr()[0],\n                    \"global_step\": global_step,\n                }, step=global_step)\n\n            if cfg.mode == \"trial\" and step > 1:  # fast exit for CI\n                break\n\n        # ---------------- Validation ----------------\n        val_acc = evaluate(model, val_loader)\n        if cfg.wandb.mode != \"disabled\":\n            wandb.log({\"validation_accuracy\": val_acc, \"epoch\": epoch + 1}, step=global_step)\n        if val_acc > best_val_acc:\n            best_val_acc = val_acc\n\n        pbar.close()\n        print(f\"Epoch {epoch+1} finished. Val accuracy = {val_acc:.4f}\")\n        if cfg.mode == \"trial\":\n            break\n\n    # ------------------------------------------------------------------\n    # Finish WandB\n    # ------------------------------------------------------------------\n    if cfg.wandb.mode != \"disabled\":\n        wandb.summary[\"best_val_acc\"] = best_val_acc\n        wandb.finish()\n\n    print(\"Training completed – best val acc:\", best_val_acc)\n\n\nif __name__ == \"__main__\":\n    main()\n",
+    "evaluate_py": "#!/usr/bin/env python\n\"\"\"src/evaluate.py\nIndependent evaluation & visualisation retrieving data from WandB.\n\"\"\"\nfrom __future__ import annotations\n\nimport argparse\nimport json\nimport os\nfrom pathlib import Path\nfrom typing import List\n\nimport matplotlib.pyplot as plt\nimport seaborn as sns\nimport wandb\nfrom tqdm.auto import tqdm\n\n# -----------------------------------------------------------------------------\n# Helpers\n# -----------------------------------------------------------------------------\n\ndef save_json(obj, path: Path):\n    path.write_text(json.dumps(obj, indent=2))\n\n\ndef plot_learning_curve(history_df, run_id: str, results_dir: Path):\n    fig, ax = plt.subplots(figsize=(6, 4))\n    if \"train_loss\" in history_df:\n        ax.plot(history_df[\"_step\"], history_df[\"train_loss\"], label=\"train_loss\")\n    if \"validation_accuracy\" in history_df:\n        ax.plot(history_df[\"_step\"], history_df[\"validation_accuracy\"], label=\"val_acc\")\n    ax.set_xlabel(\"Step\")\n    ax.set_ylabel(\"Metric value\")\n    ax.set_title(f\"Learning curve – {run_id}\")\n    ax.legend()\n    fig.tight_layout()\n    fname = results_dir / f\"{run_id}_learning_curve.pdf\"\n    fig.savefig(fname)\n    plt.close(fig)\n    return fname\n\n\ndef aggregated_bar_chart(aggregated_metrics: List[dict], results_dir: Path):\n    import pandas as pd\n    df = pd.DataFrame(aggregated_metrics)\n    fig, ax = plt.subplots(figsize=(6, 4))\n    sns.barplot(data=df, x=\"run_id\", y=\"best_val_acc\", ax=ax)\n    for idx, row in df.iterrows():\n        ax.text(idx, row.best_val_acc + 0.002, f\"{row.best_val_acc:.3f}\", ha=\"center\")\n    ax.set_ylabel(\"Best validation accuracy\")\n    ax.set_xlabel(\"\")\n    ax.set_ylim(0, df.best_val_acc.max() * 1.05)\n    fig.tight_layout()\n    fname = results_dir / \"comparison_accuracy_bar_chart.pdf\"\n    fig.savefig(fname)\n    plt.close(fig)\n    return fname\n\n\n# -----------------------------------------------------------------------------\n# Main\n# -----------------------------------------------------------------------------\n\ndef main():\n    parser = argparse.ArgumentParser(description=\"Evaluation & visualisation script\")\n    parser.add_argument(\"results_dir\", type=str, help=\"Directory to store outputs\")\n    parser.add_argument(\"run_ids\", type=str, help=\"JSON list of WandB run IDs\")\n    args = parser.parse_args()\n\n    results_dir = Path(args.results_dir).expanduser().absolute()\n    results_dir.mkdir(parents=True, exist_ok=True)\n\n    run_ids = json.loads(args.run_ids)\n\n    # ------------------------------------------------------------------\n    # Load WandB config (entity/project) from config/config.yaml\n    # ------------------------------------------------------------------\n    import yaml\n    cfg_path = Path(__file__).resolve().parent.parent / \"config\" / \"config.yaml\"\n    with cfg_path.open() as f:\n        global_cfg = yaml.safe_load(f)\n    entity = global_cfg[\"wandb\"][\"entity\"]\n    project = global_cfg[\"wandb\"][\"project\"]\n\n    api = wandb.Api()\n\n    aggregated_metrics = []\n    generated_files = []\n\n    # ------------------------------------------------------------------\n    # Per-run processing\n    # ------------------------------------------------------------------\n    for rid in tqdm(run_ids, desc=\"Fetching runs\"):\n        run = api.run(f\"{entity}/{project}/{rid}\")\n        history = run.history(samples=100000)  # get all rows\n        summary = run.summary._json_dict\n        config = dict(run.config)\n\n        run_dir = results_dir / rid\n        run_dir.mkdir(parents=True, exist_ok=True)\n\n        # Save metrics & config\n        save_json({\"history\": history.to_dict(orient=\"list\"), \"summary\": summary, \"config\": config},\n                  run_dir / \"metrics.json\")\n\n        # Learning curve\n        fig_path = plot_learning_curve(history, rid, run_dir)\n        generated_files.append(str(fig_path))\n\n        aggregated_metrics.append({\n            \"run_id\": rid,\n            \"best_val_acc\": summary.get(\"best_val_acc\", None),\n            \"method\": config.get(\"method\", \"unknown\"),\n        })\n\n    # ------------------------------------------------------------------\n    # Aggregated analysis\n    # ------------------------------------------------------------------\n    comp_dir = results_dir / \"comparison\"\n    comp_dir.mkdir(exist_ok=True)\n\n    save_json(aggregated_metrics, comp_dir / \"aggregated_metrics.json\")\n\n    fig_path = aggregated_bar_chart(aggregated_metrics, comp_dir)\n    generated_files.append(str(fig_path))\n\n    # Print all paths\n    print(\"Generated files:\")\n    for f in generated_files:\n        print(f)\n\n\nif __name__ == \"__main__\":\n    main()\n",
+    "preprocess_py": "#!/usr/bin/env python\n\"\"\"src/preprocess.py\nStandalone utilities for dataset loading & tokenisation.\nAlthough train.py inlines the most important call for speed, having a dedicated\nmodule is useful for ad-hoc debugging and analysis.\n\"\"\"\nfrom __future__ import annotations\n\nfrom datasets import load_dataset\nfrom transformers import AutoTokenizer, DataCollatorWithPadding\nfrom torch.utils.data import DataLoader\nfrom omegaconf import DictConfig\n\nCACHE_DIR = \".cache/\"\n\n\ndef get_tokenizer(model_name: str):\n    return AutoTokenizer.from_pretrained(model_name, cache_dir=CACHE_DIR)\n\n\ndef load_dataset_and_create_loaders(cfg: DictConfig):\n    tokenizer = get_tokenizer(cfg.model.name)\n\n    dataset = load_dataset(cfg.dataset.name, cfg.dataset.get(\"subset\", None), cache_dir=CACHE_DIR)\n\n    def tokenise(example):\n        return tokenizer(\n            example[\"premise\" if cfg.dataset.get(\"subset\", \"mnli\") == \"mnli\" else 0],\n            example[\"hypothesis\" if cfg.dataset.get(\"subset\", \"mnli\") == \"mnli\" else 1],\n            truncation=cfg.dataset.preprocessing.truncation,\n            padding=cfg.dataset.preprocessing.padding,\n            max_length=cfg.dataset.max_seq_length,\n        )\n\n    dataset = dataset.map(tokenise, batched=True, load_from_cache_file=True)\n    remove_cols = [c for c in dataset[\"train\"].column_names if c not in [\"input_ids\", \"token_type_ids\", \"attention_mask\", \"label\"]]\n    dataset = dataset.remove_columns(remove_cols)\n\n    collator = DataCollatorWithPadding(tokenizer)\n\n    def make_loader(split, shuffle=False, batch_size=cfg.training.batch_size):\n        return DataLoader(dataset[split], shuffle=shuffle, batch_size=batch_size, collate_fn=collator)\n\n    return tokenizer, make_loader(cfg.dataset.splits.train, True), make_loader(cfg.dataset.splits.validation, False)\n",
+    "model_py": "#!/usr/bin/env python\n\"\"\"src/model.py\nModel construction helper: base HuggingFace model + optional LoRA adapters.\n\"\"\"\nfrom __future__ import annotations\n\nfrom peft import LoraConfig, get_peft_model\nfrom transformers import AutoModelForSequenceClassification\n\nCACHE_DIR = \".cache/\"\n\n\ndef build_model(cfg):\n    \"\"\"Returns a HuggingFace model ready for training (on the current device).\"\"\"\n    num_labels = 3  # Default for MNLI; could be parameterised if needed.\n\n    base_model = AutoModelForSequenceClassification.from_pretrained(\n        cfg.model.name, cache_dir=CACHE_DIR, num_labels=num_labels)\n\n    # Always attach LoRA because baseline also uses it (with same rank)\n    lora_cfg = LoraConfig(\n        r=cfg.model.adapter.rank,\n        lora_alpha=cfg.model.adapter.lora_alpha,\n        target_modules=[\"query_proj\", \"value_proj\"],\n        bias=\"none\",\n    )\n    model = get_peft_model(base_model, lora_cfg)\n    return model\n",
+    "main_py": "#!/usr/bin/env python\n\"\"\"src/main.py\nJob orchestrator. Launches src.train as a subprocess so that each Hydra run is\nself-contained (train.py will create its own Hydra output directory).\n\"\"\"\nfrom __future__ import annotations\n\nimport os\nimport shlex\nimport subprocess\nimport sys\n\nimport hydra\nfrom omegaconf import DictConfig\n\n\n@hydra.main(config_path=\"../config\", version_base=None)\ndef main(cfg: DictConfig):\n    # Mode adjustments (also repeated in train.py for safety)\n    if cfg.mode == \"trial\":\n        cfg.wandb.mode = \"disabled\"\n        cfg.optuna.n_trials = 0\n        cfg.training.epochs = 1\n    elif cfg.mode == \"full\":\n        cfg.wandb.mode = \"online\"\n    else:\n        raise ValueError(\"mode must be either 'trial' or 'full'\")\n\n    # Build command\n    cmd = [\n        sys.executable,\n        \"-u\",\n        \"-m\",\n        \"src.train\",\n        f\"run={cfg.run.run_id}\",\n        f\"results_dir={cfg.results_dir}\",\n        f\"mode={cfg.mode}\",\n    ]\n    cmd_str = \" \".join(shlex.quote(c) for c in cmd)\n    print(\"Launching training subprocess:\", cmd_str)\n\n    # Propagate environment (WANDB_API_KEY etc.)\n    env = os.environ.copy()\n    subprocess.run(cmd, check=True, env=env)\n\n\nif __name__ == \"__main__\":\n    main()\n",
+    "pyproject_toml": "[build-system]\nrequires = [\"setuptools>=42\", \"wheel\"]\nbuild-backend = \"setuptools.build_meta\"\n\n[project]\nname = \"iwlora-glue\"\nversion = \"0.1.0\"\ndescription = \"Importance-Weighted LoRA experiments on GLUE\"\nrequires-python = \">=3.9\"\ndependencies = [\n    \"torch>=2.1\",\n    \"transformers>=4.37\",\n    \"datasets>=2.14\",\n    \"peft>=0.6.2\",\n    \"scikit-learn>=1.3\",\n    \"hydra-core>=1.3\",\n    \"wandb>=0.16\",\n    \"optuna>=3.5\",\n    \"seaborn>=0.13\",\n    \"matplotlib>=3.8\",\n]\n\n[tool.setuptools.packages.find]\nwhere = [\"src\"]\n",
+    "config_yaml": "# config/config.yaml\n\ndefaults:\n  - runs: null  # will be overridden from CLI with run=<run_id>\n\nwandb:\n  entity: gengaru617-personal\n  project: 251106-test\n  mode: online  # overwritten to \"disabled\" in trial mode\n\n# Global parameters editable via CLI or run-specific configs\nmode: full        # default\nresults_dir: ./results\n\n# Placeholder groups so that nested access always exists\ntraining: {}\noptuna: {}\nmodel: {}\ndataset: {}\nrun: {}\n"
+}
