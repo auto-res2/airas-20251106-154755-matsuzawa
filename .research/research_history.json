@@ -129,6 +129,10 @@
       "expected_result": "IW-LoRA should match AdaLoRA and outperform vanilla LoRA while training in roughly the same time as LoRA (≈10-15 % faster than AdaLoRA). On GLUE we expect:\nMNLI accuracy: LoRA 84.6, AdaLoRA 85.3, IW-LoRA ≈85.1.\nSST-2 accuracy: LoRA 93.2, AdaLoRA 93.8, IW-LoRA ≈93.7.\nRTE F1: LoRA 72.0, AdaLoRA 73.4, IW-LoRA ≈73.2.\nAverage gain of ~0.6 points over vanilla LoRA with negligible extra compute.",
       "expected_conclusion": "A single importance-weighted L2 term lets the model allocate its fixed low-rank capacity where it matters, approaching AdaLoRA’s accuracy without its computational overhead or complex pruning schedule. The change is only a few lines of code and one new global hyper-parameter (α), making the technique easy to adopt in any LoRA-based fine-tuning pipeline."
     },
-    "iterations": []
+    "iterations": [
+      {
+        "method": "Importance–Weighted LoRA (IW-LoRA)\nMinimal change: keep standard LoRA training but add a single extra L2 term whose coefficient is different for every weight matrix.\n1. Warm-up (calibration) phase: run 100–200 forward/backward passes with LoRA parameters frozen (or very small lr) and record the running average of per-matrix gradient sensitivity s_k = E[||∂L/∂W_k||_F].\n2. Define importance weight w_k = s_k / (Σ_j s_j).\n3. During actual fine-tuning (LoRA parameters trainable) minimise\n   L_total = L_task  +  α · Σ_k (1 – w_k)^β · ||Δ_k||_F² ,\n   where Δ_k is the LoRA update for matrix k, α≃1e-4 and β=1 (can be fixed).\n   Layers with high w_k receive almost no penalty and can use the rank budget freely, while unimportant layers are softly shrunk toward zero; the fixed global rank therefore re-allocates itself automatically without pruning or SVD."
+      }
+    ]
   }
 }
